@@ -51,6 +51,7 @@
 - 時刻処理は Clock interface を通してテスト可能にする
 - 打刻データはイベント履歴として保存し、表示・集計用の状態はイベントから導出する
 - APIはUseCase単位で設計し、HTTPエンドポイントはUseCaseへの入力境界として扱う
+- ProjectionやSnapshotを直接編集するAPIは提供しない
 - バッチ処理は cmd 配下の別エントリポイントとして分離する
 - README・ADR・SpecをSSOTとして、Claude Codeに渡す前提で進める
 
@@ -87,6 +88,8 @@
 - 修正時は既存イベントを更新せず、修正イベントを追加する
 - attendance_days / work_sessions は再生成可能なProjectionとして扱う
 - monthly_summaries は月締め時にSnapshotとして固定する
+- アプリケーションはProjectionを直接編集するAPIを提供しない
+- 休憩時間、案件、交通費などの変更はUseCaseを通じてイベントを追加し、その結果としてProjectionを更新する
 - 原則として1勤務日につき1セッションとする
 - allow_multiple_sessions=true の場合のみ、同一勤務日に複数セッションを許可する
 - 打刻時にはサーバー時刻に加えて、可能な範囲でGPS情報を記録し、不正検知や管理者確認に利用する
@@ -120,6 +123,12 @@
 - closed: employee / admin ともに編集不可、解除不可、再計算不可
 - closed後の誤りは、将来の差分訂正仕様で扱う
 
+### 月次Snapshot
+
+- monthly_summaries は月締め時にSnapshotとして固定する
+- Snapshotには、計算日時、計算ルールID、計算ルールバージョン、計算対象イベント範囲を保存する
+- closed後のmonthly_summariesは再計算しない
+
 ### 勤怠一覧・集計
 
 - employee は自分の勤怠を日単位・月単位で確認できる
@@ -136,6 +145,7 @@
 - GPSは任意取得とし、取得できない場合でも打刻は可能とする
 - GPSは管理側の不正検知情報として扱う
 - 位置情報は90日保存し、将来的に削除バッチで破棄する
+- 90日経過後は緯度・経度・精度を削除し、gps_status = deleted_after_retention として削除済み状態を残す
 - 管理画面では位置情報の詳細表示を限定する
 - GPS情報は attendance_event_locations として attendance_events から分離して保存する
 - attendance_event_locations は event_id / latitude / longitude / accuracy_meters / gps_status / captured_at を持つ想定とする
@@ -144,9 +154,17 @@
 
 - 勤務セッションは稼働案件を1つ持つ
 - ユーザーと稼働案件の紐づきは user_project_assignments で管理する
+- 勤務セッションには、勤務時点で選択された案件IDを保存する
+- user_project_assignments はユーザーが選択可能な案件の有効期間を表す
+- 過去の勤務セッションは、closedでない限りUseCase経由で案件変更可能とする
+- 案件変更時はイベントを追加する
 - 交通費は勤務セッションに紐づく申請データとして扱う
 - 交通費申請は片道経路・片道料金・申請区分を持つ
 - 申請区分は one_way / round_trip とする
+- 交通費申請額 amount_yen は、片道料金と申請区分から導出する
+- MVPではemployeeによるamount_yenの直接上書きは許可しない
+- adminが例外的に上書きする場合は、交通費修正イベントを追加し、amount_yen_source = admin_override とする
+- 交通費の編集可否は、対象月の月次勤怠状態に従う
 - MVPでは経路と金額の正当性チェックは行わない
 - 片道料金は0円以上の整数とする
 - 経路ラベルは空文字不可とする
@@ -177,12 +195,17 @@
 ### API方針
 
 - APIはUseCaseごとのエンドポイントに分ける
-- 打刻系APIは Idempotency-Key を受け付ける
+- 打刻系APIは Idempotency-Key ヘッダーを必須とする
+- 冪等性キーは user_id + endpoint + key の単位で管理する
+- 同一キーかつ同一payloadの場合は前回レスポンスを返す
+- 同一キーでpayloadが異なる場合は 409 Conflict を返す
+- 冪等性キーの保存期間は24時間とする
 - DB制約とトランザクションで二重打刻を防ぐ
 - 具体的なHTTPメソッド・パス・リクエスト/レスポンスはOpenAPIとSpecで定義する
 
 ### API候補
 
+- 以下の更新系エンドポイントはUseCaseの入口であり、Projectionを直接更新するAPIではない
 - POST /api/attendance/clock-in
 - POST /api/attendance/clock-out
 - PUT /api/work-sessions/{id}/break-minutes
