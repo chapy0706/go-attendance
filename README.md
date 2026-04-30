@@ -127,6 +127,9 @@
 
 - monthly_summaries は月締め時にSnapshotとして固定する
 - Snapshotには、計算日時、計算ルールID、計算ルールバージョン、計算対象イベント範囲を保存する
+- 計算対象イベント範囲は時刻ではなくevent_sequenceで保持する
+- monthly_summaries には source_event_sequence_from / source_event_sequence_to / source_last_event_id / calculated_at / calculation_rule_id / calculation_rule_version を保存する
+- 修正イベントが後から追加された場合、event_sequenceの進行によって再計算対象であることを検知する
 - closed後のmonthly_summariesは再計算しない
 
 ### 勤怠一覧・集計
@@ -146,6 +149,7 @@
 - GPSは管理側の不正検知情報として扱う
 - 位置情報は90日保存し、将来的に削除バッチで破棄する
 - 90日経過後は緯度・経度・精度を削除し、gps_status = deleted_after_retention として削除済み状態を残す
+- captured_at は位置取得に関する監査メタデータとして保持する
 - 管理画面では位置情報の詳細表示を限定する
 - GPS情報は attendance_event_locations として attendance_events から分離して保存する
 - attendance_event_locations は event_id / latitude / longitude / accuracy_meters / gps_status / captured_at を持つ想定とする
@@ -156,7 +160,9 @@
 - ユーザーと稼働案件の紐づきは user_project_assignments で管理する
 - 勤務セッションには、勤務時点で選択された案件IDを保存する
 - user_project_assignments はユーザーが選択可能な案件の有効期間を表す
-- 過去の勤務セッションは、closedでない限りUseCase経由で案件変更可能とする
+- 勤務セッションの案件変更は、対象月がclosedでない場合のみ許可する
+- 変更先案件は、勤務日時点で有効なuser_project_assignmentsに含まれる案件のみ許可する
+- 有効期間外の案件への変更はMVPでは許可しない
 - 案件変更時はイベントを追加する
 - 交通費は勤務セッションに紐づく申請データとして扱う
 - 交通費申請は片道経路・片道料金・申請区分を持つ
@@ -164,6 +170,8 @@
 - 交通費申請額 amount_yen は、片道料金と申請区分から導出する
 - MVPではemployeeによるamount_yenの直接上書きは許可しない
 - adminが例外的に上書きする場合は、交通費修正イベントを追加し、amount_yen_source = admin_override とする
+- adminによるamount_yen上書き時は override_reason / overridden_by_user_id / overridden_at を必須とする
+- adminによるamount_yen上書き時は transportation_claim_corrected イベントを追加する
 - 交通費の編集可否は、対象月の月次勤怠状態に従う
 - MVPでは経路と金額の正当性チェックは行わない
 - 片道料金は0円以上の整数とする
@@ -195,9 +203,13 @@
 ### API方針
 
 - APIはUseCaseごとのエンドポイントに分ける
+- Projectionを直接更新しているように見えるAPI名は避ける
+- 全ての更新系エンドポイントはUseCaseの入口であり、Projectionを直接更新するAPIではない
+- 更新系エンドポイントはHTTPメソッドにPUTではなくPOSTを使い、イベント追加の意図を明示する
 - 打刻系APIは Idempotency-Key ヘッダーを必須とする
+- 成功したリクエストのみ冪等性キーを保存し、失敗レスポンスは保存しない
 - 冪等性キーは user_id + endpoint + key の単位で管理する
-- 同一キーかつ同一payloadの場合は前回レスポンスを返す
+- 同一キーかつ同一payloadの場合は前回成功レスポンスを返す
 - 同一キーでpayloadが異なる場合は 409 Conflict を返す
 - 冪等性キーの保存期間は24時間とする
 - DB制約とトランザクションで二重打刻を防ぐ
@@ -205,15 +217,19 @@
 
 ### API候補
 
-- 以下の更新系エンドポイントはUseCaseの入口であり、Projectionを直接更新するAPIではない
-- POST /api/attendance/clock-in
-- POST /api/attendance/clock-out
-- PUT /api/work-sessions/{id}/break-minutes
-- PUT /api/work-sessions/{id}/project
+| 操作 | エンドポイント | 追加されるイベント |
+| --- | --- | --- |
+| 出勤打刻 | POST /api/attendance/clock-in | clock_in_recorded |
+| 退勤打刻 | POST /api/attendance/clock-out | clock_out_recorded |
+| 休憩時間変更 | POST /api/work-sessions/{id}/break-minutes/change | break_minutes_changed |
+| 案件変更 | POST /api/work-sessions/{id}/project/change | project_changed |
+| 交通費修正（admin） | POST /api/transportation-claims/{id}/correct | transportation_claim_corrected |
+| デフォルト申請設定更新 | POST /api/commute-defaults/{id}/update | commute_default_updated |
+
+### 参照系API候補
+
 - GET /api/transportation-claims
-- PUT /api/transportation-claims/{id}
 - GET /api/commute-defaults
-- PUT /api/commute-defaults/{id}
 
 ## 想定機能
 
