@@ -128,6 +128,7 @@
 - monthly_summaries は月締め時にSnapshotとして固定する
 - Snapshotには、計算日時、計算ルールID、計算ルールバージョン、計算対象イベント範囲を保存する
 - 計算対象イベント範囲は時刻ではなくevent_sequenceで保持する
+- event_sequence はPostgreSQL BIGSERIALによるグローバル連番とし、歯抜けは許容する
 - monthly_summaries には source_event_sequence_from / source_event_sequence_to / source_last_event_id / calculated_at / calculation_rule_id / calculation_rule_version を保存する
 - 修正イベントが後から追加された場合、event_sequenceの進行によって再計算対象であることを検知する
 - closed後のmonthly_summariesは再計算しない
@@ -173,12 +174,14 @@
 - adminによるamount_yen上書き時は override_reason / overridden_by_user_id / overridden_at を必須とする
 - adminによるamount_yen上書き時は transportation_claim_corrected イベントを追加する
 - 交通費の編集可否は、対象月の月次勤怠状態に従う
+- closed後の交通費修正は不可とし、後追い精算は将来仕様としてSpecに残す
 - MVPでは経路と金額の正当性チェックは行わない
 - 片道料金は0円以上の整数とする
 - 経路ラベルは空文字不可とする
 - デフォルト申請設定を用意し、シフト申請時または退勤打刻時に初期値として反映できるようにする
 - デフォルト申請設定はテンプレートであり、実際の交通費申請にはその時点の値をスナップショットとして保存する
 - 交通費申請の履歴は transportation_claim_events として記録する
+- デフォルト申請設定の変更履歴は commute_default_history を独立テーブルとして管理する
 
 ### データモデル候補
 
@@ -189,6 +192,7 @@
 - attendance_days
 - work_sessions
 - commute_defaults
+- commute_default_history
 - transportation_claims
 - transportation_claim_events
 - monthly_summaries
@@ -206,7 +210,7 @@
 - Projectionを直接更新しているように見えるAPI名は避ける
 - 全ての更新系エンドポイントはUseCaseの入口であり、Projectionを直接更新するAPIではない
 - 更新系エンドポイントはHTTPメソッドにPUTではなくPOSTを使い、イベント追加の意図を明示する
-- 打刻系APIは Idempotency-Key ヘッダーを必須とする
+- MVPでは打刻系APIのみ Idempotency-Key ヘッダーを必須とし、更新系全般への適用は次フェーズで検討する
 - 成功したリクエストのみ冪等性キーを保存し、失敗レスポンスは保存しない
 - 冪等性キーは user_id + endpoint + key の単位で管理する
 - 同一キーかつ同一payloadの場合は前回成功レスポンスを返す
@@ -217,14 +221,14 @@
 
 ### API候補
 
-| 操作 | エンドポイント | 追加されるイベント |
+| 操作 | エンドポイント | 記録される変更 |
 | --- | --- | --- |
 | 出勤打刻 | POST /api/attendance/clock-in | clock_in_recorded |
 | 退勤打刻 | POST /api/attendance/clock-out | clock_out_recorded |
 | 休憩時間変更 | POST /api/work-sessions/{id}/break-minutes/change | break_minutes_changed |
 | 案件変更 | POST /api/work-sessions/{id}/project/change | project_changed |
 | 交通費修正（admin） | POST /api/transportation-claims/{id}/correct | transportation_claim_corrected |
-| デフォルト申請設定更新 | POST /api/commute-defaults/{id}/update | commute_default_updated |
+| デフォルト申請設定更新 | POST /api/commute-defaults/{id}/update | commute_default_history record |
 
 ### 参照系API候補
 
